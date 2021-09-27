@@ -10,7 +10,7 @@ This code uses the [Histo-Cloud](https://github.com/SarderLab/Histo-cloud) plugi
 
 The train_network plugin is called via the REST API to train a network on each DSA instance before the resulting models are downloaded to the master server and averaged. 
 
-<h2>Useage</h2>
+<h2>Usage</h2>
 
 The Deeplab ImageNet pretrained model can be downloaded from [here](https://buffalo.box.com/s/izjhqdqtlrznm9zh4k5dv2d6j9tz7n77). This model should be placed in the same folder as this code prior to training.
 
