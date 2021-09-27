@@ -1,60 +1,72 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import requests, json, time, os, zipfile, io
 import girder_client
 from datetime import datetime
 from joblib import Parallel, delayed
 from glob import glob
-import numpy as np
-import six
-from six.moves import zip  # pylint: disable=redefined-builtin
+from avg_checkpoints import avg_checkpoints
 
 class federated(object):
     """
     A class that provides functions for federated learning of semantic
     segmentaiton of WSIs via multiple distributed servers.
-    This uses the Digital slide archive and HistomicsTK to perform training
+    This uses the Digital slide archive and HistomicsTK-DeepLab to perform training
     """
 
     def __init__(self):
 
         ### starting params ###
-        self.training_steps_per_round = 100
-        self.training_rounds = 2
+        self.training_steps_per_round = 1000
+        self.training_rounds = 40
         self.global_step = 0
-        self.slow_start_step = 5
-        self.patch_size = 400
-        self.learning_rate = 0.0005
-        self.learning_rate_start = 0.00001
+        self.slow_start_step = 750
+        self.patch_size = 512
+        self.learning_rate = 0.007
+        self.learning_rate_start = 0.0001
         self.end_learning_rate = 0.0
         self.learning_power = 0.9
         self.wsi_downsample = [1,2,3,4]
-        self.batch_size = 2
+        # self.batch_size = 6
         self.fine_tune_batch_norm = False
-        self.augment = 0
-        self.init_last_layer = True
-        self.gpu = '0'
-        self.num_clones = 1
+        self.augment = 0.0
+        self.init_last_layer = False
+        self.gpu = "0,1"
+        self.num_clones = 2
         self.classes = '["gloms"]'
-        self.output_model = 'model.zip'
+        self.ignore_label = 'ignore'
+        self.output_model = 'IFTA-model.zip'
         self.starting_model = 'model-ImageNet-Xception.zip'
+        self.last_layer_gradient_multiplier = 10
+        self.last_layers_contain_logits_only = False
+        self.upsample_logits = True
 
         ### server params ###
         self.server_params = []
+
+        ### SERVER 0 ###
         self.server_params.append({
-                'token'                 : 'RccgHJJZDE0PiaU17HZaNJsQKqbjEeatzyiJQu9rmUtbUhYZhNjRJZoGA7R6V9zi',
-                'url'                   : 'http://zeus.med.buffalo.edu:8080',
-                'inputFolder'           : '60821209cef56adf6fc063be',
-                'output_model_folder'   : '6082be9bcef56adf6fc06847',
+                'token'                 : 'Girder API token',
+                'url'                   : 'URL of DSA for server 0',
+                'inputFolder'           : 'DSA folder ID for training WSIs',
+                'output_model_folder'   : 'DSA folder ID for saved network models',
+                'batch_size'            : 12,
                 })
 
+        ### SERVER 1 ###
         self.server_params.append({
-                'token'                 : 'yp89C63Cr7dKHJecN0NsiiTFx4f9dmwK1oQoq9RUVKRMJWypGMBE2TovOAnk1KL6',
-                'url'                   : 'http://kronos.med.buffalo.edu:8080',
-                'inputFolder'           : '6082174f19c88eb9f84a89a7',
-                'output_model_folder'   : '6082be8419c88eb9f84a8bdb',
+                'token'                 : 'Girder API token',
+                'url'                   : 'URL of DSA for server 1',
+                'inputFolder'           : 'DSA folder ID for training WSIs',
+                'output_model_folder'   : 'DSA folder ID for saved network models',
+                'batch_size'            : 4,
+                })
+
+        ### SERVER 2 ###
+        self.server_params.append({
+                'token'                 : 'Girder API token',
+                'url'                   : 'URL of DSA for server 2',
+                'inputFolder'           : 'DSA folder ID for training WSIs',
+                'output_model_folder'   : 'DSA folder ID for saved network models',
+                'batch_size'            : 4,
                 })
 
 
@@ -63,7 +75,9 @@ class federated(object):
     ############################################################################
 
     def federated_training(self):
-        total_training_steps = self.training_steps_per_round * self.training_rounds
+        self.total_training_steps = self.training_steps_per_round * self.training_rounds + self.global_step
+        self.end_learning_rate_final = self.end_learning_rate
+        self.learning_rate_inital = self.learning_rate
 
         def training_round(server_dict, starting_model):
             # upload starting model
@@ -74,16 +88,32 @@ class federated(object):
 
         # federated training step
         for round in range(self.training_rounds):
-            round += 1
-            print('\nstarting training round {}\n'.format(round))
-            self.training_steps = self.training_steps_per_round * round
+            self.round = round + 1
+            print('\nstarting training round {}\n'.format(self.round))
+            print('initialize last layer: {}'.format(self.init_last_layer))
+            self.training_steps = self.global_step + self.training_steps_per_round
 
-            # run training in parallel
-            model_folders = Parallel(n_jobs=len(self.server_params))(delayed(training_round)(server_dict, self.starting_model) for server_dict in self.server_params)
+            if self.init_last_layer:
+                # run training in parallel
+                model_folders = Parallel(n_jobs=len(self.server_params))(delayed(training_round)(server_dict, self.starting_model) for server_dict in self.server_params)
+            else:
+                # only train one model for round 1
+                model_folders = Parallel(n_jobs=1)(delayed(training_round)(server_dict, self.starting_model) for server_dict in self.server_params[:1])
+
+            # use last layer after first training round
+            self.init_last_layer = True
+
+            # update global step
+            self.global_step = self.training_steps
 
             # average models
-            saved_model_name = 'round-{}-averaged-model'.format(round)
+            saved_model_name = 'round-{}-averaged-model'.format(self.round)
             self.starting_model = self.average_and_zip_model(model_folders, saved_model_name)
+
+        # upload final models
+        model_folders = Parallel(n_jobs=len(self.server_params))(delayed(self.upload_model)(server_dict, self.starting_model) for server_dict in self.server_params)
+        print('\n\nTraining done!\nFinal model created: {}'.format(self.starting_model))
+
 
 
     ############################################################################
@@ -109,7 +139,7 @@ class federated(object):
 
         now = datetime.now().strftime("%m-%d-%Y %H_%M_%S")
         base, ext = os.path.splitext(self.output_model)
-        output_model_name = '{}-{}{}'.format(base, now, ext)
+        output_model_name = 'round-{}-{}-{}{}'.format(self.round, base, now, ext)
 
         params = (
             ('inputFolder', args['inputFolder']),
@@ -119,8 +149,9 @@ class federated(object):
             ('WSI_downsample', str(self.wsi_downsample)),
             ('augment', str(self.augment)),
             ('batch_norm', str(self.fine_tune_batch_norm)),
-            ('batch_size', str(self.batch_size)),
+            ('batch_size', str(args['batch_size'])),
             ('classes', self.classes),
+            ('ignore_label', str(self.ignore_label)),
             ('init_last_layer', str(self.init_last_layer)),
             ('learning_rate', str(self.learning_rate)),
             ('learning_rate_start', str(self.learning_rate_start)),
@@ -130,9 +161,13 @@ class federated(object):
             ('slow_start_step', str(self.slow_start_step)),
             ('steps', str(self.training_steps)),
             ('global_step', str(self.global_step)),
+            ('decay_steps', str(self.total_training_steps)),
             ('end_learning_rate', str(self.end_learning_rate)),
             ('learning_power', str(self.learning_power)),
             ('use_xml', 'false'),
+            ('last_layer_gradient_multiplier', str(self.last_layer_gradient_multiplier)),
+            ('last_layers_contain_logits_only', str(self.last_layers_contain_logits_only)),
+            ('upsample_logits', str(self.upsample_logits)),
             ('girderApiUrl', '{}/api/v1'.format(args['url'])),
         )
 
@@ -143,7 +178,7 @@ class federated(object):
 
         body = json.loads(response.content)
         job_id = body['_id']
-        print('\tjob submited on {} with id: {}'.format(server, job_id))
+        print('\tjob submited on {} with id: {}\n'.format(server, job_id))
 
         ### check training status ###
         status = 0
@@ -152,10 +187,13 @@ class federated(object):
             response = requests.get('{}/api/v1/job/{}'.format(args['url'], job_id), headers=headers)
             body = json.loads(response.content)
             status = body['status']
-            print('\t{} | {} still training...'.format(datetime.now().strftime("%H:%M:%S"), server))
+            print('\t{} | {} still training...'.format(datetime.now().strftime("%H:%M:%S"), server), end='\r')
 
-        print('\t{} done with status code: {}'.format(server, status))
-        assert status==3, '!!! training job failed on {} !!!'.format(args['url'])
+        print('\n\n\t{} done with status code: {}\n\n'.format(server, status))
+        try:
+            assert status==3, '\n\n!!! training job failed on {} !!!\n\n'.format(args['url'])
+        except:
+            return None
 
 
         ### download saved model ###
@@ -182,104 +220,19 @@ class federated(object):
 
         # extract models from zip
         model_path = os.path.splitext(output_model_name)[0]
-        model_path = '{} - {}'.format(server,model_path)
+        model_path = '{}-{}'.format(server,model_path)
         if not os.path.exists(model_path):
             os.mkdir(model_path)
 
         z = zipfile.ZipFile(io.BytesIO(response.content))
         for name in z.namelist():
             z.extract(name, model_path)
+
+        # delete model
+        response = requests.delete('{}/api/v1/item/{}'.format(args['url'], model_id), headers=headers)
+
         return model_path
 
-    def avg_checkpoints(self, input_checkpoints="", num_last_checkpoints=0, prefix="", output_path="averaged.ckpt"):
-        """Script to average values of variables in a list of checkpoint files."""
-        import tensorflow.compat.v1 as tf
-        os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"   # see issue #152
-        os.environ["CUDA_VISIBLE_DEVICES"]=self.gpu
-
-        # flags.DEFINE_string("checkpoints", "",
-        #                     "Comma-separated list of checkpoints to average.")
-        # flags.DEFINE_integer("num_last_checkpoints", 0,
-        #                      "Averages the last N saved checkpoints."
-        #                      " If the checkpoints flag is set, this is ignored.")
-        # flags.DEFINE_string("prefix", "",
-        #                     "Prefix (e.g., directory) to append to each checkpoint.")
-        # flags.DEFINE_string("output_path", "/tmp/averaged.ckpt",
-        #                     "Path to output the averaged checkpoint to.")
-
-        def checkpoint_exists(path):
-            return (tf.gfile.Exists(path) or tf.gfile.Exists(path + ".meta") or
-                    tf.gfile.Exists(path + ".index"))
-
-
-        if input_checkpoints:
-            # Get the checkpoints list from flags and run some basic checks.
-            checkpoints = [c.strip() for c in input_checkpoints]
-            checkpoints = [c for c in checkpoints if c]
-            if not checkpoints:
-                raise ValueError("No checkpoints provided for averaging.")
-            if prefix:
-                checkpoints = [prefix + c for c in checkpoints]
-
-        else:
-            assert num_last_checkpoints >= 1, "Must average at least one model"
-            assert prefix, ("Prefix must be provided when averaging last"
-                                                        " N checkpoints")
-            checkpoint_state = tf.train.get_checkpoint_state(
-                    os.path.dirname(prefix))
-            # Checkpoints are ordered from oldest to newest.
-            checkpoints = checkpoint_state.all_model_checkpoint_paths[
-                    -num_last_checkpoints:]
-
-        checkpoints = [c for c in checkpoints if checkpoint_exists(c)]
-        if not checkpoints:
-            if input_checkpoints:
-                raise ValueError(
-                        "None of the provided checkpoints exist. %s" % input_checkpoints)
-            else:
-                raise ValueError("Could not find checkpoints at %s" %
-                                                 os.path.dirname(prefix))
-
-        # Read variables from all checkpoints and average them.
-        tf.logging.info("Reading variables and averaging checkpoints:")
-        for c in checkpoints:
-            tf.logging.info("%s ", c)
-        var_list = tf.train.list_variables(checkpoints[0])
-        var_values, var_dtypes = {}, {}
-        for (name, shape) in var_list:
-            if not name.startswith("global_step"):
-                var_values[name] = np.zeros(shape)
-        for checkpoint in checkpoints:
-            reader = tf.train.load_checkpoint(checkpoint)
-            for name in var_values:
-                tensor = reader.get_tensor(name)
-                var_dtypes[name] = tensor.dtype
-                var_values[name] += tensor
-            tf.logging.info("Read from checkpoint %s", checkpoint)
-        for name in var_values:    # Average.
-            var_values[name] /= len(checkpoints)
-
-        with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
-            tf_vars = [
-                    tf.get_variable(v, shape=var_values[v].shape, dtype=var_dtypes[v])
-                    for v in var_values
-            ]
-        placeholders = [tf.placeholder(v.dtype, shape=v.shape) for v in tf_vars]
-        assign_ops = [tf.assign(v, p) for (v, p) in zip(tf_vars, placeholders)]
-        global_step = tf.Variable(
-                self.global_step, name="global_step", trainable=False, dtype=tf.int64)
-        saver = tf.train.Saver(tf.all_variables())
-
-        # Build a model consisting only of variables, set them to the average values.
-        with tf.Session() as sess:
-            sess.run(tf.global_variables_initializer())
-            for p, assign_op, (name, value) in zip(placeholders, assign_ops,
-                        six.iteritems(var_values)):
-                sess.run(assign_op, {p: value})
-            # Use the built saver to save the averaged checkpoint.
-            saver.save(sess, output_path, global_step=global_step)
-
-        tf.logging.info("Averaged checkpoints saved in %s", output_path)
 
     def average_and_zip_model(self, model_folders, saved_model_name):
 
@@ -306,20 +259,30 @@ class federated(object):
 
         models = []
         for folder in model_folders:
-            models.append(find_model_in_folder(folder))
+            if folder is not None:
+                models.append(find_model_in_folder(folder))
         os.rename('{}/args.txt'.format(folder), 'args.txt')
-        # average models
-        print('\taveraging model parameters...')
-        self.avg_checkpoints(input_checkpoints=models, output_path='{}.ckpt'.format(saved_model_name))
+
+        if len(models) > 1:
+            # average models
+            print('\taveraging model parameters...')
+            avg_checkpoints(input_checkpoints=models, output_path='{}.ckpt'.format(saved_model_name), global_step_start=self.global_step)
+            saved_model_path = saved_model_name
+        else:
+            saved_model_path = os.path.splitext(models[0])[0]
+            models = glob('{}*'.format(saved_model_path))
+            for model in models:
+                os.rename(model, os.path.basename(model))
+            saved_model_path = os.path.basename(saved_model_path)
 
         # zip models
         zip_model_name = '{}.zip'.format(saved_model_name)
-        zip_model('{}.ckpt'.format(saved_model_name), zip_model_name)
+        zip_model('{}.ckpt'.format(saved_model_path), zip_model_name)
         os.rename('args.txt', '{}/args.txt'.format(folder))
         return zip_model_name
 
 
 
-# run code
-fed = federated()
-fed.federated_training()
+# # run code
+# fed = federated()
+# fed.federated_training()
