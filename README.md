@@ -1,9 +1,7 @@
 # federated_learning
 Federated learning using the Digital Slide Archive and HistomicsTK-deeplab
 
-.. image:: https://github.com/SarderLab/federated_learning/blob/main/federated%20diagram.jpg
-  :width: 400
-  :alt: Federated overview diagram
+[Federated learning diagram](https://github.com/SarderLab/federated_learning/blob/main/federated%20diagram.pdf)
 
 <h2>Setup</h2>
 
