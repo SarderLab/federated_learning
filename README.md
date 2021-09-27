@@ -12,6 +12,8 @@ The train_network plugin is called via the REST API to train a network on each D
 
 <h2>Useage</h2>
 
+The Deeplab ImageNet pretrained model can be downloaded from [here](https://buffalo.box.com/s/izjhqdqtlrznm9zh4k5dv2d6j9tz7n77). This model should be placed in the same folder as this code prior to training.
+
 The hyper-parameters for training can be adjusted in the [federated_training.py](https://github.com/SarderLab/federated_learning/blob/main/federated_training.py) code. 
 
 An example of how to start the training is provided in [run_federated_learning.py](https://github.com/SarderLab/federated_learning/blob/main/run_federated_learning.py)
