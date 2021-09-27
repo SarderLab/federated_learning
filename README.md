@@ -1,7 +1,7 @@
 # federated_learning
 Federated learning using the Digital Slide Archive and HistomicsTK-deeplab
 
-![Federated learning diagram](federated%20diagram.pdf)
+<img src = "./federated diagram.pdf" width="80%"/>
 
 <h2>Setup</h2>
 
