@@ -1,6 +1,8 @@
 # federated_learning
 Federated learning using the Digital Slide Archive and HistomicsTK-deeplab
 
+[https://github.com/SarderLab/federated_learning/blob/main/federated%20diagram.pdf](Federated learning diagram)
+
 <h2>Setup</h2>
 
 Federated workers can be setup by intalling the [Digital Slide Archive](https://digitalslidearchive.github.io/digital_slide_archive/)  
