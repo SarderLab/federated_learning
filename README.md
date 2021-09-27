@@ -1,4 +1,4 @@
-# federated_learning
+# Federated segmentation of whole slide images
 Federated learning using the Digital Slide Archive and HistomicsTK-deeplab
 
 <img src = "./federated diagram.jpg" width="60%"/>
